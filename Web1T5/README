@@ -1,0 +1,172 @@
+
+        Google Web 1T 5-Grams made Easy  |  Version 1.1
+
+
+This is a collection of Perl scripts for easy indexing of the Google Web 1T 5-Gram Database available from
+
+    http://www.ldc.upenn.edu/Catalog/CatalogEntry.jsp?catalogId=LDC2006T13
+
+with the open-source SQLite database engine
+
+    http://www.sqlite.org/
+
+The distribution also includes a Web front-end for interactive queries to the indexed database.
+
+These scripts were quickly put together as an easy and cheap way to get an interactively searchable version of the Web 1T5 database, including collocation tables that are not part of the original database. The scripts leave much to be desired in terms of software engineering and should probably not be used as the basis for a large research or coding project.
+
+In order to make the database more compact and efficient, words are stored in a separate lexicon database and the N-grams are encoded as sequences of lexicon IDs; a similar encoding is used for the collocations database. Nevertheless, the total database size is still 180-220 GB (or more, depending on normalisation options) and the indexing process may take more than a week (depending on disk speed, available RAM and server load). Once the SQLite database hase been created, though, most queries are executed within a few seconds.
+
+
+PREREQUISITES
+
+ - the original Google Web 1T 5-Grams data (as compressed text files)
+ - Perl 5.8.1 or newer
+ - recent versions of the following Perl modules:
+    - CGI (should be included in Perl distribution)
+    - DBI (1.57 or newer) 
+    - DBD::SQLite (1.25 or newer)
+ - approx. 220 GB of hard disk space for the fully indexed database (with normalisation)
+    - without normalisation, the database will become substantially larger
+    - additional disk space may be needed during the indexing process
+ - a fast computer with a generous amount of RAM (a minimum of 4 GB is strongly recommended)
+ - a lot of patience (and a steady supply of coffee)
+
+
+BUILDING THE DATABASE
+
+In the instructions below, ${WEB1T5} refers to the root directory of the original Web 1T 5-Grams distribution (with subdirectories 1gms/, 2gms/, etc.). You can either set this environment variable, or replace every mention of ${WEB1T5} with the appropriate path in the commands below. It is also assumed that the subdirectory perl/ of the Web1T5-Easy distribution has been copied to the current directory; otherwise adjust the paths to the indexing scripts below. The SQLite database, consisting of multiple database files, will be created in the current working directory, which should offer at least 250 GB of free disk space.
+
+The first step is to build a vocabulary database, which maps word types to lexicon IDs and contains additional frequency information:
+
+    perl perl/mk_vocab_db.perl --normalize ${WEB1T5}/1gms/vocab.gz vocabulary.dat
+
+The "--normalize" flag causes all strings to be converted to lowercase; in addition, numbers are replaced by "NUM", common punctuation symbols by "PUN", and "messy" words (for some definition of "messy") are replaced by "UNK". The hyphen "-" is preserved as a separate type since Google's tokenisation procedure splits up hyphenated compounds into multiple tokens.
+
+Omit "--normalize" to store the original mixed-case N-grams without normalisation. This should also speed up the indexing process considerably, but will substantially enlarge the database (I estimate that 400 GB or more of disk space may be needed). If you want to change normalisation rules, you have to edit the function normalize_string() in the file "perl/Web1T5_Support.pm". **Make sure that the corresponding function normalizeString() in "cgi-bin/Web1T5_CGI.pm" is changed accordingly, or you may get nonsensical query results from the Web interface!** (Note that the functions normalize_string() and normalizeString() are not completely identical.)
+
+Type "perl perl/mk_vocab_db.perl" for information about further command-line options. In particular, you may want to change the default block size of 4 KiB for the SQLite database (the default is said to give best performance on standard Linux platforms), or the default database cache size of 1 GiB RAM.
+
+If you have a command-line version of SQLite, you can now inspect the vocabulary database manually:
+
+    sqlite3 vocabulary.dat
+
+In the second step, separate SQLite database files are generated for each N-gram size (N = 1..5), using the following commands.  Note that you have to call "perl/mk_ngram_db.perl" and "perl/mk_vocab_db.perl" with the same normalisation flags, i.e. if you have omitted "--normalize" above, you must also remove it from all the commands below. For optimal performance, adjust the database cache size with the "--cache" option depending on available RAM and number of concurrent users (e.g., "--cache=500M", or "--cache=4G"; the default is to cache 1 GiB of data in RAM). Type "perl perl/mk_ngram_db.perl" for further command-line options.
+
+    perl perl/mk_ngram_db.perl --normalize --temp=${TMPDIR} 1 1-grams.dat vocabulary.dat
+    perl perl/mk_ngram_db.perl --normalize --temp=${TMPDIR} 2 2-grams.dat vocabulary.dat ${WEB1T5}/2gms/*.gz
+    perl perl/mk_ngram_db.perl --normalize --temp=${TMPDIR} 3 3-grams.dat vocabulary.dat ${WEB1T5}/3gms/*.gz
+    perl perl/mk_ngram_db.perl --normalize --temp=${TMPDIR} 4 4-grams.dat vocabulary.dat ${WEB1T5}/4gms/*.gz
+    perl perl/mk_ngram_db.perl --normalize --temp=${TMPDIR} 5 5-grams.dat vocabulary.dat ${WEB1T5}/5gms/*.gz
+
+IMPORTANT NOTE: SQLite may create huge temporary files during the indexing process (up to 50 GB) if it has to perform normalisation. The default temporary directory /tmp/ is usually located on a relatively small root partition with insufficient free disk space for these files. Therefore, it is essential to specify a temporary directory on a sufficiently large disk partition (possibly the one where the main database files are stored) with the "--temp" option (indicated by ${TMPDIR} in the commands above). If you fail to do this, your server will be slowed down and may lock up entirely when the root partition overflows.
+
+Do not attempt to run the 5 commands above in parallel, even on a multi-core server. Database indexing makes very intensive use of the hard disk, so multiple processes will block each other and take much more time to complete than running the commands in sequence.  The first command creates a virtual unigram table that enables queries on the vocabulary database through the standard n-gram Web interface.
+
+Expect the indexing procedure to take up to 10 days on a state-of-the-art server with a fast hard disk and a generous amounts of RAM (of course, having 64 GB of RAM or more will speed things up a lot :-). You should now have a SQLite database of the WEB 1T5 N-grams consisting of the following disk files:
+
+    vocabulary.dat
+    1-grams.dat
+    2-grams.dat
+    3-grams.dat
+    4-grams.dat
+    5-grams.dat
+
+The final step generates a database of surface collocations (see Evert 2008 for definition and mathematical details) from the indexed n-gram tables, using a simple multi-pass algorithm. It is crucial to adjust the item cache size for this algorithm with the "--items" option. A 64-bit server with the recommended minimum of 8 GB RAM will easily handle up to 5 million items ("--items=5M"); on 32-bit platforms the data structures are more compact and it should be possible to use "--items=5M" with only 4 GB RAM. You can also increase the database cache for the final indexing stage with the "--cache" option, as above (the items cache is no longer needed at indexing time, so this will not conflict with a large "--items" value).
+
+Type "perl perl/mk_colloc_db.perl" for further command-line options. For instance, you can reduce the maximum size of the collocational span with the "--window" option if you have not indexed all n-gram tables. If you did not use the standard names for the vocabulary and n-gram database files above, you will have to specify the appropriate filenames with the "--vocab" and "--ngram" options.
+
+    perl perl/mk_colloc_db.perl --normalize --items=4M --temp=${TMPDIR} collocations.db
+
+The time required for the extraction of co-occurrence data depends crucially on the size of the item cache. On a quiet 64-bit Linux server with 16 GB RAM and "--items=10M", the procedure was completed over a single weekend.
+
+
+COMMAND-LINE QUERIES
+
+There is little point in browsing the SQLite databases manually (with the "sqlite3" command-line utility) because the N-grams are encoded as sequences of lexicon IDs and are not human-readable.  The program "perl/ngram_query.perl" provides a simple command-line interface for searching the N-gram database.  The basic usage is
+
+    perl perl/ngram_query.perl [options] '<query>'
+
+where <query> is a sequence of up to 5 whitespace-delimited words and/or wildcards.  Note the single quotes to keep the shell from (mis)interpreting wildcards such as "*" as metacharacters. Five different kinds of query terms are supported:
+
+    literati     ...  a specific word form
+    [mouse,mice] ...  one of the listed word forms
+    %erati       ...  wildcard '%' matches arbitrary substring
+    *            ...  an arbitrary word (included in n-gram)
+    ?            ...  skipped position (not included in n-gram)
+
+The program will consult the appropriate database file to find all N-grams matching <query> and display them sorted by frequency. You can limit the number of terms displayed with the "--limit" option (e.g. "-l 50"). You can also instruct the program to group different "fillers" for query terms such as "[mouse,mice]" or "%erati" (with the "--group" option), or to collapse them into a single frequency count (with the "--collapse" option). See
+
+    perl perl/ngram_query.perl --help
+
+for further program options. It may be a good idea to specify "--optimize" (or "-o") for non-trivial queries (in theory, the database engine should be able to do this automatically, but some tests showed much better performance with "-o"), and to set an appropriate temporary directory with "--temp" in case your query creates large intermediate result sets.
+
+Note that "perl/ngram_query.perl" expects to find the SQLite database files in the current working directory under the names specified above. You can change these defaults with the "--vocab" and "--ngram" options.
+
+As an example, you can try the query
+
+    perl perl/ngram_query.perl -l 5 -o 'only * and *'
+
+which should complete in less than 10 seconds. Use the "--verbose" option for detailed timing and debugging information.
+
+
+WEB INTERFACE
+
+This distribution also includes a simple Web interface to the Web1T5-Easy databases. It consists of several Perl CGI scripts in the cgi-bin/ directory. Simply copy these scripts, as well as the support library "cgi-bin/Web1T5_CGI.pm", to a CGI directory on your Web server and adjust the configuration settings in "Web1T5_CGI.pm" (see below). If you do not know where to find the CGI directory, please ask your system administrator for assistance. It is recommended to put the Web1T5-Easy scripts in a separate subdirectory named, e.g., Web1T5/. In any case, the library "Web1T5_CGI.pm" MUST BE IN THE SAME DIRECTORY as the scripts.
+
+The following configuration settings can be adjusted in "Web1T5_CGI.pm":
+
+    $VocabFile        ...  full path to the vocabulary database file
+    $NgramFilePattern ...  full path to the N-gram database files (where %d stands for the N-gram size N)
+    $CollocFile       ...  full path to the collocations database file
+    $TempDir          ...  directory for temporary files (preferably not on the root partition)
+    $CacheSize        ...  size of database cache, may help to speed up complex queries (use $MiB for MB and $GiB for GB)
+    $Optimize         ...  whether to apply query optimiser by default (recommended!)
+    $MaxJobs          ...  number of queries that are allowed to run in parallel (to limit load on the Web server)
+    $Root             ...  root URL of the Web1T5-Easy CGI scripts (default relative path should work on most systems)
+    $CSS              ...  full URL of the CSS stylesheet to be used for page display
+
+In order to speed up page loading, you should download the GOPHER CSS templates from
+
+    http://purl.org/stefan.evert/GOPHER/
+
+install them in a suitable directory on your Web server, and change the "$CSS" configuration variable above to the local URL of the appropriate CSS style. Of course, you can also substitute your own CSS stylesheet. Further changes to the page display, e.g. to display a custom site copyright or disclaimer message, can be made by editing Perl functions such as printSiteMessage() in "Web1T5_CGI.pm".
+
+If you have put all scripts in a subdirectory Web1T5/ of your server's CGI directory, as recommended above, you can now access the Web interface at the URL
+
+    http://your.server/cgi-bin/Web1T5/Web1T5_freq.perl
+
+The Web interface will allow you to switch between (i) standard frequency lists; (ii) association lists, where matching N-grams are ranked by one of five association measures; and (iii) collocation tables, where collocates can be ranked by the same five association measures and left/right span sizes can be set as desired (up to 4 tokens). Further usage information is available in the online help page of each CGI script. If some of the database files are not available, the corresponding parts of the Web interface will automatically be hidden. This allows you to use the Web interface without generating collocation tables, or provide access to the collocations database without keeping copies of the full n-gram tables (this reduces disk space requirements to less than 33 GB).
+
+Please keep in mind that SQLite is NOT A DATABASE SERVER, but an embedded library. This means that the SQLite database files have to be accessible on the server running the Web interface, preferably on a local hard disk. Also note that a standard Web server may not offer the necessary disk cache and processing capacity, so it is recommended to install the Web1T5-Easy CGI scripts on a dedicated server.
+
+
+CHANGES
+
+Version 1.1 [2010-04-14]
+
+  - virtual unigram table allows queries to vocabulary database through n-gram Web interface
+  - changed weights in query optimisation: random access through non-clustered index is now considered 1000x more expensive than a linear scan, rather than the previous factor of 40x; this reduces execution time for some relatively simple queries such as "web as corpus" drastically (from more than 50s to less than 2s)
+  - various minor bug fixes
+
+Version 1.0 [2009-06-21]
+
+  - generate collocation database (surface co-occurrences) from n-gram tables, with neat Web interface
+  - better optimisation of SQLite database (block size and RAM cache, both user-configurable)
+  - refactored indexing and CGI scripts to load common functionality from local Perl modules
+
+Version 0.9 [2009-02-11]
+
+  - first public release (under the name Web1T5-SQLite)
+
+
+REFERENCES
+
+Evert, Stefan (2008). Corpora and collocations. In A. Lüdeling and M. Kytö (eds.), Corpus Linguistics. An International Handbook, chapter 58. Mouton de Gruyter, Berlin.
+
+
+COPYRIGHT
+
+Copyright (C) 2008-2010 by Stefan Evert [http://purl.org/stefan.evert/]
+
+This software is provided AS IS and the author makes no warranty as to its use and performance. You may use the software, redistribute and modify it under the terms of the Artistic License (see "perldoc perlartistic" for licensing details).
+
